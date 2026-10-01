@@ -1,8 +1,8 @@
 // ==WindhawkMod==
 // @id              cascade-windows-personal
 // @name            Centered Cascade Windows
-// @description     Center app windows in taskbar icon order
-// @version         1.9
+// @description     Center app windows in taskbar order on each virtual desktop
+// @version         2.0
 // @author          Local custom mod
 // @include         explorer.exe
 // @architecture    x86-64
@@ -14,7 +14,8 @@
 Ordinary app windows already open are arranged into a centered diagonal cascade.
 Windows follow their taskbar icons from left to right. Windows under one icon
 stay together, oldest first. Dragging an icon reorders the cascade within two
-seconds. The whole group stays centered. Closing or minimizing a window recenters;
+seconds. Each virtual desktop has its own cascade. The whole group stays centered.
+Closing or minimizing a window recenters;
 restoring it adds it back. The Nahimic audio app, dialogs, tool windows, and
 maximized windows are left alone. The steps shrink evenly when needed to keep
 all windows on screen.
@@ -39,6 +40,7 @@ Disable the mod in Windhawk to stop it.
 #include <windows.h>
 #include <initguid.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <appmodel.h>
 #include <propkey.h>
 #include <propsys.h>
@@ -69,6 +71,15 @@ std::vector<HWND> g_order;
 ULONGLONG g_reflowAt = 0;
 std::vector<std::wstring> g_taskbarOrder;
 IUIAutomation* g_automation = nullptr;
+IVirtualDesktopManager* g_desktops = nullptr;
+std::unordered_set<HWND> g_currentWindows;
+
+bool OnCurrentDesktop(HWND hwnd) {
+    if (!g_desktops) return true;
+    BOOL current = FALSE;
+    HRESULT result = g_desktops->IsWindowOnCurrentVirtualDesktop(hwnd, &current);
+    return FAILED(result) || current;
+}
 
 BOOL CALLBACK FindTaskbarBridge(HWND hwnd, LPARAM result) {
     wchar_t className[128] = {};
@@ -175,7 +186,8 @@ BOOL CALLBACK RememberWindow(HWND hwnd, LPARAM) {
 bool Eligible(HWND hwnd) {
     if (!IsWindow(hwnd) || !IsWindowVisible(hwnd) || IsZoomed(hwnd) ||
         IsIconic(hwnd) ||
-        GetAncestor(hwnd, GA_ROOT) != hwnd || GetWindow(hwnd, GW_OWNER)) {
+        GetAncestor(hwnd, GA_ROOT) != hwnd || GetWindow(hwnd, GW_OWNER) ||
+        !OnCurrentDesktop(hwnd)) {
         return false;
     }
     LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
@@ -229,13 +241,16 @@ void ArrangeAllWindows() {
     // A live scan repairs missed show/destroy events before assigning slots.
     EnumWindows(RememberWindow, 0);
     std::unordered_map<HMONITOR, std::vector<HWND>> byMonitor;
+    std::unordered_set<HWND> currentWindows;
     for (HWND hwnd : g_order) {
         if (g_pending.contains(hwnd) || !Eligible(hwnd)) {
             continue;
         }
         HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         byMonitor[monitor].push_back(hwnd);
+        currentWindows.insert(hwnd);
     }
+    g_currentWindows = std::move(currentWindows);
     for (auto& [monitor, windows] : byMonitor) {
         MONITORINFO info = {sizeof(info)};
         if (!GetMonitorInfoW(monitor, &info)) {
@@ -311,6 +326,10 @@ DWORD WINAPI WatchWindows(void*) {
     if (SUCCEEDED(com))
         CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
                          IID_PPV_ARGS(&g_automation));
+    if (SUCCEEDED(com) &&
+        FAILED(CoCreateInstance(CLSID_VirtualDesktopManager, nullptr, CLSCTX_ALL,
+                                IID_PPV_ARGS(&g_desktops))))
+        Wh_Log(L"Could not connect to Windows virtual desktops");
     MSG message;
     PeekMessageW(&message, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
     LoadSettings();
@@ -333,12 +352,25 @@ DWORD WINAPI WatchWindows(void*) {
         if (g_destroyHook) UnhookWinEvent(g_destroyHook);
         if (g_minimizeHook) UnhookWinEvent(g_minimizeHook);
         if (timerId) KillTimer(nullptr, timerId);
+        if (g_desktops) g_desktops->Release();
+        if (g_automation) g_automation->Release();
+        if (SUCCEEDED(com)) CoUninitialize();
         return 1;
     }
     ULONGLONG nextTaskbarCheck = GetTickCount64() + 2000;
+    ULONGLONG nextDesktopCheck = GetTickCount64() + 750;
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
         if (message.message == WM_TIMER && message.wParam == timerId) {
             PlaceReadyWindows();
+            if (GetTickCount64() >= nextDesktopCheck) {
+                nextDesktopCheck = GetTickCount64() + 750;
+                EnumWindows(RememberWindow, 0);
+                std::unordered_set<HWND> currentWindows;
+                for (HWND hwnd : g_order)
+                    if (!g_pending.contains(hwnd) && Eligible(hwnd))
+                        currentWindows.insert(hwnd);
+                if (currentWindows != g_currentWindows) ArrangeAllWindows();
+            }
             if (GetTickCount64() >= nextTaskbarCheck) {
                 nextTaskbarCheck = GetTickCount64() + 2000;
                 auto order = ReadTaskbarOrder();
@@ -359,6 +391,7 @@ DWORD WINAPI WatchWindows(void*) {
     UnhookWinEvent(g_showHook);
     UnhookWinEvent(g_destroyHook);
     UnhookWinEvent(g_minimizeHook);
+    if (g_desktops) g_desktops->Release();
     if (g_automation) g_automation->Release();
     if (SUCCEEDED(com)) CoUninitialize();
     return 0;
