@@ -2,7 +2,7 @@
 // @id              cascade-windows-personal
 // @name            Centered Cascade Windows
 // @description     Center app windows in taskbar order on each virtual desktop
-// @version         2.0
+// @version         2.2
 // @author          Local custom mod
 // @include         explorer.exe
 // @architecture    x86-64
@@ -19,7 +19,10 @@ Closing or minimizing a window recenters;
 restoring it adds it back. The Nahimic audio app, dialogs, tool windows, and
 maximized windows are left alone. The steps shrink evenly when needed to keep
 all windows on screen.
-Window sizes are based on a 3000 x 2000 display and scaled for other monitors.
+Window width is based on a 3000 x 2000 display and scaled for other monitors.
+The width and height settings both remain editable. Changing width makes height
+follow the selected screen ratio; changing height makes width follow it. Windhawk
+does not display the calculated counterpart in its settings editor.
 Disable the mod in Windhawk to stop it.
 */
 // ==/WindhawkModReadme==
@@ -28,6 +31,14 @@ Disable the mod in Windhawk to stop it.
 /*
 - width: 2500
   $name: Window width (pixels)
+- screenRatio: "monitor"
+  $name: Screen ratio
+  $description: Window width and height follow this ratio. Current monitor uses each display's actual aspect ratio.
+  $options:
+  - "monitor": Current monitor
+  - "3:2": "3:2"
+  - "16:10": "16:10"
+  - "16:9": "16:9"
 - height: 1550
   $name: Window height (pixels)
 - stepX: 40
@@ -56,10 +67,14 @@ constexpr UINT kReloadSettings = WM_APP + 1;
 constexpr UINT kDelayMs = 400;
 
 struct Settings {
-    int width, height, stepX, stepY;
+    int width, screenRatio, height, stepX, stepY;
 };
 
 Settings g_settings;
+int g_lastWidth = 2500;
+int g_lastHeight = 1550;
+bool g_loadedSettings = false;
+bool g_heightIsDriver = false;
 HANDLE g_thread = nullptr;
 DWORD g_threadId = 0;
 HWINEVENTHOOK g_showHook = nullptr;
@@ -172,7 +187,24 @@ int Setting(const wchar_t* name, int fallback) {
 }
 
 void LoadSettings() {
-    g_settings = {Setting(L"width", 2500), Setting(L"height", 1550),
+    const int width = Setting(L"width", 2500);
+    const int height = Setting(L"height", 1550);
+    if (!g_loadedSettings) {
+        g_heightIsDriver = Wh_GetIntValue(L"heightIsDriver", 0) != 0;
+    } else if (width != g_lastWidth || height != g_lastHeight) {
+        // If both fields change in one save, width takes precedence.
+        g_heightIsDriver = width == g_lastWidth;
+        Wh_SetIntValue(L"heightIsDriver", g_heightIsDriver ? 1 : 0);
+    }
+    g_lastWidth = width;
+    g_lastHeight = height;
+    g_loadedSettings = true;
+    PCWSTR ratio = Wh_GetStringSetting(L"screenRatio");
+    int screenRatio = wcscmp(ratio, L"3:2") == 0 ? 1 :
+                      wcscmp(ratio, L"16:10") == 0 ? 2 :
+                      wcscmp(ratio, L"16:9") == 0 ? 3 : 0;
+    Wh_FreeStringSetting(ratio);
+    g_settings = {width, screenRatio, height,
                   Setting(L"stepX", 40), Setting(L"stepY", 30)};
 }
 
@@ -218,10 +250,20 @@ RECT Place(const RECT& monitor, const RECT& work, unsigned index,
     const int monitorH = monitor.bottom - monitor.top;
     const int workW = work.right - work.left;
     const int workH = work.bottom - work.top;
-    const int width = std::min(Scaled(g_settings.width, monitorW, 3000),
-                               std::max(300, workW - 40));
-    const int height = std::min(Scaled(g_settings.height, monitorH, 2000),
-                                std::max(200, workH - 40));
+    int ratioW = monitorW;
+    int ratioH = monitorH;
+    if (g_settings.screenRatio == 1) { ratioW = 3; ratioH = 2; }
+    else if (g_settings.screenRatio == 2) { ratioW = 16; ratioH = 10; }
+    else if (g_settings.screenRatio == 3) { ratioW = 16; ratioH = 9; }
+    const int requestedWidth = g_heightIsDriver
+                                   ? MulDiv(Scaled(g_settings.height, monitorH, 2000),
+                                            ratioW, ratioH)
+                                   : Scaled(g_settings.width, monitorW, 3000);
+    const int width = std::min(requestedWidth,
+                               std::min(std::max(300, workW - 40),
+                                        MulDiv(std::max(200, workH - 40),
+                                               ratioW, ratioH)));
+    const int height = MulDiv(width, ratioH, ratioW);
     const int dx = std::max(1, Scaled(g_settings.stepX, monitorW, 3000));
     const int dy = std::max(1, Scaled(g_settings.stepY, monitorH, 2000));
     const int gaps = std::max(1, static_cast<int>(count) - 1);

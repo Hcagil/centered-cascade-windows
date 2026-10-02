@@ -9,16 +9,18 @@ A [Windhawk](https://windhawk.net/) mod for Windows 11 that arranges ordinary ap
 - The cascade is centered as a group. Each monitor is arranged independently.
 - Each Windows virtual desktop has its own cascade. Windows on another desktop do not count toward the active desktop's positions.
 - Maximized windows, dialogs, tool windows, and Nahimic are excluded. File Explorer is included.
-- Window size and horizontal/vertical steps are configurable in Windhawk. Defaults are 2500 × 1550 px and 40 × 30 px, scaled from a 3000 × 2000 display to other monitor sizes. The steps shrink when needed to keep the cascade on screen.
+- Window width, height, ratio, and horizontal/vertical steps are configurable in Windhawk. The most recently changed dimension controls the actual window size: changing width calculates height, and changing height calculates width. **Screen ratio** defaults to **Current monitor** (3:2 on a 3000 × 2000 display) and can be set to 3:2, 16:10, or 16:9. The starting width is 2500 px and the steps default to 40 × 30 px. Dimensions scale to other monitors, and the steps shrink when needed to keep the cascade on screen.
 
 ## Install
 
 1. Install [Windhawk](https://windhawk.net/) on Windows 11.
 2. In Windhawk, create a local mod, paste the contents of [`cascade-windows.wh.cpp`](cascade-windows.wh.cpp), then compile and enable it.
-3. Adjust **Window width**, **Window height**, and the two **Shift** settings in the mod's settings page.
+3. Adjust **Window width** or **Window height**, **Screen ratio**, and the two **Shift** settings in the mod's settings page.
 
 Disable the mod in Windhawk to stop automatic positioning.
 
 ## Notes
 
 Taskbar order is read from the Windows 11 taskbar accessibility tree. Apps without a matching AppUserModelID are placed after matched apps, retaining their previous order. The mod targets 64-bit `explorer.exe` and has been tested on one Windows 11 laptop with a 3000 × 2000 display and two virtual desktops.
+
+Windhawk 1.7.3 does not update the other dimension displayed in its settings editor. The linked size applies to actual app windows after saving. If both width and height are edited before one save, width takes precedence.
