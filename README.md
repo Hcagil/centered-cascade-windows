@@ -8,7 +8,7 @@ A [Windhawk](https://windhawk.net/) mod for Windows 11 that arranges ordinary ap
 - Closing or minimizing a window recenters the remaining windows. Restoring it adds it back.
 - The cascade is centered as a group. Each monitor is arranged independently.
 - Each Windows virtual desktop has its own cascade. Windows on another desktop do not count toward the active desktop's positions.
-- Maximized windows, dialogs, tool windows, and Nahimic are excluded. File Explorer is included.
+- Maximized windows, dialogs, tool windows, Nahimic, and the Windhawk app are excluded. File Explorer is included.
 - Window width, height, and horizontal/vertical steps are configurable in Windhawk. Defaults are 2500 × 1550 px and 40 × 30 px, scaled from a 3000 × 2000 display to other monitors. The steps shrink when needed to keep the cascade on screen.
 - Apps listed under **Apps whose size is ignored** keep their own window sizes. Enter executable names such as `notepad.exe`; app IDs also work. These windows still follow the cascade positions.
 - Dragging a window border keeps that window's new size until it closes. Dragging only to move it leaves size behavior unchanged. Neither action adds an app to the saved ignore list.

@@ -2,7 +2,7 @@
 // @id              cascade-windows-personal
 // @name            Centered Cascade Windows
 // @description     Center app windows in taskbar order on each virtual desktop
-// @version         2.3
+// @version         2.4
 // @author          Local custom mod
 // @include         explorer.exe
 // @architecture    x86-64
@@ -17,7 +17,7 @@ stay together, oldest first. Dragging an icon reorders the cascade within two
 seconds. Each virtual desktop has its own cascade. The whole group stays centered.
 Closing or minimizing a window recenters;
 restoring it adds it back. The Nahimic audio app, dialogs, tool windows, and
-maximized windows are left alone. The steps shrink evenly when needed to keep
+maximized windows, and the Windhawk app are left alone. The steps shrink evenly when needed to keep
 all windows on screen.
 Window sizes are based on a 3000 x 2000 display and scaled for other monitors.
 Apps in the size ignore list keep their size but still take a cascade position.
@@ -249,6 +249,10 @@ bool Eligible(HWND hwnd) {
         lstrcmpW(className, L"#32770") == 0 ||
         !GetWindowTextW(hwnd, title, ARRAYSIZE(title)) ||
         lstrcmpiW(title, L"Nahimic") == 0) {
+        return false;
+    }
+    if (lstrcmpiW(title, L"Windhawk") == 0 &&
+        ExecutableName(hwnd) == L"vscodium.exe") {
         return false;
     }
     RECT rect;
