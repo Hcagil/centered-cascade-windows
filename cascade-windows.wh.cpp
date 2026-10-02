@@ -2,7 +2,7 @@
 // @id              cascade-windows-personal
 // @name            Centered Cascade Windows
 // @description     Center app windows in taskbar order on each virtual desktop
-// @version         2.2
+// @version         2.3
 // @author          Local custom mod
 // @include         explorer.exe
 // @architecture    x86-64
@@ -19,10 +19,10 @@ Closing or minimizing a window recenters;
 restoring it adds it back. The Nahimic audio app, dialogs, tool windows, and
 maximized windows are left alone. The steps shrink evenly when needed to keep
 all windows on screen.
-Window width is based on a 3000 x 2000 display and scaled for other monitors.
-The width and height settings both remain editable. Changing width makes height
-follow the selected screen ratio; changing height makes width follow it. Windhawk
-does not display the calculated counterpart in its settings editor.
+Window sizes are based on a 3000 x 2000 display and scaled for other monitors.
+Apps in the size ignore list keep their size but still take a cascade position.
+Dragging a window border keeps that window's new size until it closes; moving a
+window without resizing it does not change its size behavior.
 Disable the mod in Windhawk to stop it.
 */
 // ==/WindhawkModReadme==
@@ -31,20 +31,15 @@ Disable the mod in Windhawk to stop it.
 /*
 - width: 2500
   $name: Window width (pixels)
-- screenRatio: "monitor"
-  $name: Screen ratio
-  $description: Window width and height follow this ratio. Current monitor uses each display's actual aspect ratio.
-  $options:
-  - "monitor": Current monitor
-  - "3:2": "3:2"
-  - "16:10": "16:10"
-  - "16:9": "16:9"
 - height: 1550
   $name: Window height (pixels)
 - stepX: 40
   $name: Shift each window right (pixels)
 - stepY: 30
   $name: Shift each window down (pixels)
+- ignoredSizeApps: [""]
+  $name: Apps whose size is ignored
+  $description: Executable names such as notepad.exe, or app IDs. These windows still move with the cascade.
 */
 // ==/WindhawkModSettings==
 
@@ -57,6 +52,7 @@ Disable the mod in Windhawk to stop it.
 #include <propsys.h>
 #include <uiautomation.h>
 #include <algorithm>
+#include <cwctype>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -67,20 +63,20 @@ constexpr UINT kReloadSettings = WM_APP + 1;
 constexpr UINT kDelayMs = 400;
 
 struct Settings {
-    int width, screenRatio, height, stepX, stepY;
+    int width, height, stepX, stepY;
 };
 
 Settings g_settings;
-int g_lastWidth = 2500;
-int g_lastHeight = 1550;
-bool g_loadedSettings = false;
-bool g_heightIsDriver = false;
 HANDLE g_thread = nullptr;
 DWORD g_threadId = 0;
 HWINEVENTHOOK g_showHook = nullptr;
 HWINEVENTHOOK g_destroyHook = nullptr;
 HWINEVENTHOOK g_minimizeHook = nullptr;
+HWINEVENTHOOK g_moveSizeHook = nullptr;
 std::unordered_set<HWND> g_known;
+std::unordered_set<HWND> g_manualSizeWindows;
+std::unordered_map<HWND, SIZE> g_dragStartSizes;
+std::unordered_set<std::wstring> g_ignoredSizeApps;
 std::unordered_map<HWND, ULONGLONG> g_pending;
 std::vector<HWND> g_order;
 ULONGLONG g_reflowAt = 0;
@@ -181,31 +177,51 @@ std::wstring AppId(HWND hwnd) {
     return id;
 }
 
+std::wstring Lower(std::wstring value) {
+    const auto first = value.find_first_not_of(L" \t\r\n");
+    if (first == std::wstring::npos) return {};
+    const auto last = value.find_last_not_of(L" \t\r\n");
+    value = value.substr(first, last - first + 1);
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
+    return value;
+}
+
+std::wstring ExecutableName(HWND hwnd) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return {};
+    wchar_t path[1024] = {};
+    DWORD length = ARRAYSIZE(path);
+    bool found = QueryFullProcessImageNameW(process, 0, path, &length);
+    CloseHandle(process);
+    if (!found) return {};
+    const wchar_t* name = wcsrchr(path, L'\\');
+    return Lower(name ? name + 1 : path);
+}
+
+bool IgnoreAppSize(HWND hwnd) {
+    if (g_ignoredSizeApps.empty()) return false;
+    if (g_ignoredSizeApps.contains(ExecutableName(hwnd))) return true;
+    return g_ignoredSizeApps.contains(Lower(AppId(hwnd)));
+}
+
 int Setting(const wchar_t* name, int fallback) {
     int value = Wh_GetIntSetting(name);
     return value >= 0 && value <= 10000 ? value : fallback;
 }
 
 void LoadSettings() {
-    const int width = Setting(L"width", 2500);
-    const int height = Setting(L"height", 1550);
-    if (!g_loadedSettings) {
-        g_heightIsDriver = Wh_GetIntValue(L"heightIsDriver", 0) != 0;
-    } else if (width != g_lastWidth || height != g_lastHeight) {
-        // If both fields change in one save, width takes precedence.
-        g_heightIsDriver = width == g_lastWidth;
-        Wh_SetIntValue(L"heightIsDriver", g_heightIsDriver ? 1 : 0);
-    }
-    g_lastWidth = width;
-    g_lastHeight = height;
-    g_loadedSettings = true;
-    PCWSTR ratio = Wh_GetStringSetting(L"screenRatio");
-    int screenRatio = wcscmp(ratio, L"3:2") == 0 ? 1 :
-                      wcscmp(ratio, L"16:10") == 0 ? 2 :
-                      wcscmp(ratio, L"16:9") == 0 ? 3 : 0;
-    Wh_FreeStringSetting(ratio);
-    g_settings = {width, screenRatio, height,
+    g_settings = {Setting(L"width", 2500), Setting(L"height", 1550),
                   Setting(L"stepX", 40), Setting(L"stepY", 30)};
+    g_ignoredSizeApps.clear();
+    for (int i = 0; i < 64; ++i) {
+        PCWSTR entry = Wh_GetStringSetting(L"ignoredSizeApps[%d]", i);
+        std::wstring name = Lower(entry);
+        Wh_FreeStringSetting(entry);
+        if (!name.empty()) g_ignoredSizeApps.insert(std::move(name));
+    }
 }
 
 BOOL CALLBACK RememberWindow(HWND hwnd, LPARAM) {
@@ -236,8 +252,9 @@ bool Eligible(HWND hwnd) {
         return false;
     }
     RECT rect;
-    return GetWindowRect(hwnd, &rect) && rect.right - rect.left >= 300 &&
-           rect.bottom - rect.top >= 200;
+    return GetWindowRect(hwnd, &rect) &&
+           (g_manualSizeWindows.contains(hwnd) ||
+            (rect.right - rect.left >= 300 && rect.bottom - rect.top >= 200));
 }
 
 int Scaled(int value, int dimension, int reference) {
@@ -250,20 +267,10 @@ RECT Place(const RECT& monitor, const RECT& work, unsigned index,
     const int monitorH = monitor.bottom - monitor.top;
     const int workW = work.right - work.left;
     const int workH = work.bottom - work.top;
-    int ratioW = monitorW;
-    int ratioH = monitorH;
-    if (g_settings.screenRatio == 1) { ratioW = 3; ratioH = 2; }
-    else if (g_settings.screenRatio == 2) { ratioW = 16; ratioH = 10; }
-    else if (g_settings.screenRatio == 3) { ratioW = 16; ratioH = 9; }
-    const int requestedWidth = g_heightIsDriver
-                                   ? MulDiv(Scaled(g_settings.height, monitorH, 2000),
-                                            ratioW, ratioH)
-                                   : Scaled(g_settings.width, monitorW, 3000);
-    const int width = std::min(requestedWidth,
-                               std::min(std::max(300, workW - 40),
-                                        MulDiv(std::max(200, workH - 40),
-                                               ratioW, ratioH)));
-    const int height = MulDiv(width, ratioH, ratioW);
+    const int width = std::min(Scaled(g_settings.width, monitorW, 3000),
+                               std::max(300, workW - 40));
+    const int height = std::min(Scaled(g_settings.height, monitorH, 2000),
+                                std::max(200, workH - 40));
     const int dx = std::max(1, Scaled(g_settings.stepX, monitorW, 3000));
     const int dy = std::max(1, Scaled(g_settings.stepY, monitorH, 2000));
     const int gaps = std::max(1, static_cast<int>(count) - 1);
@@ -313,9 +320,29 @@ void ArrangeAllWindows() {
             RECT target = Place(info.rcMonitor, info.rcWork,
                                 static_cast<unsigned>(index),
                                 static_cast<unsigned>(windows.size()));
-            SetWindowPos(windows[index], nullptr, target.left, target.top,
-                         target.right - target.left, target.bottom - target.top,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
+            HWND hwnd = windows[index];
+            if (g_manualSizeWindows.contains(hwnd) || IgnoreAppSize(hwnd)) {
+                RECT current;
+                if (!GetWindowRect(hwnd, &current)) continue;
+                const int width = current.right - current.left;
+                const int height = current.bottom - current.top;
+                const int x = std::clamp(target.left +
+                                             ((target.right - target.left) - width) / 2,
+                                         info.rcWork.left,
+                                         std::max(info.rcWork.left,
+                                                  info.rcWork.right - width));
+                const int y = std::clamp(target.top +
+                                             ((target.bottom - target.top) - height) / 2,
+                                         info.rcWork.top,
+                                         std::max(info.rcWork.top,
+                                                  info.rcWork.bottom - height));
+                SetWindowPos(hwnd, nullptr, x, y, 0, 0,
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            } else {
+                SetWindowPos(hwnd, nullptr, target.left, target.top,
+                             target.right - target.left, target.bottom - target.top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
         }
     }
 }
@@ -346,6 +373,8 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG objectId,
         return;
     }
     if (event == EVENT_OBJECT_DESTROY) {
+        g_manualSizeWindows.erase(hwnd);
+        g_dragStartSizes.erase(hwnd);
         if (g_known.erase(hwnd)) {
             g_order.erase(std::remove(g_order.begin(), g_order.end(), hwnd),
                           g_order.end());
@@ -355,6 +384,22 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG objectId,
     } else if (event == EVENT_OBJECT_SHOW && g_known.insert(hwnd).second) {
         g_order.push_back(hwnd);
         g_pending[hwnd] = GetTickCount64() + kDelayMs;
+    } else if (event == EVENT_SYSTEM_MOVESIZESTART && Eligible(hwnd)) {
+        RECT rect;
+        if (GetWindowRect(hwnd, &rect))
+            g_dragStartSizes[hwnd] = {rect.right - rect.left,
+                                      rect.bottom - rect.top};
+    } else if (event == EVENT_SYSTEM_MOVESIZEEND) {
+        auto it = g_dragStartSizes.find(hwnd);
+        if (it != g_dragStartSizes.end()) {
+            RECT rect;
+            if (GetWindowRect(hwnd, &rect) &&
+                (rect.right - rect.left != it->second.cx ||
+                 rect.bottom - rect.top != it->second.cy))
+                g_manualSizeWindows.insert(hwnd);
+            g_dragStartSizes.erase(it);
+            g_reflowAt = GetTickCount64() + 150;
+        }
     } else if (event == EVENT_SYSTEM_MINIMIZESTART ||
                event == EVENT_SYSTEM_MINIMIZEEND) {
         g_reflowAt = GetTickCount64() + 150;
@@ -387,12 +432,17 @@ DWORD WINAPI WatchWindows(void*) {
     g_minimizeHook = SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART,
                                     EVENT_SYSTEM_MINIMIZEEND, nullptr,
                                     OnWinEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
+    g_moveSizeHook = SetWinEventHook(EVENT_SYSTEM_MOVESIZESTART,
+                                    EVENT_SYSTEM_MOVESIZEEND, nullptr,
+                                    OnWinEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
     UINT_PTR timerId = SetTimer(nullptr, 0, 100, nullptr);
-    if (!g_showHook || !g_destroyHook || !g_minimizeHook || !timerId) {
+    if (!g_showHook || !g_destroyHook || !g_minimizeHook ||
+        !g_moveSizeHook || !timerId) {
         Wh_Log(L"Could not start window watcher");
         if (g_showHook) UnhookWinEvent(g_showHook);
         if (g_destroyHook) UnhookWinEvent(g_destroyHook);
         if (g_minimizeHook) UnhookWinEvent(g_minimizeHook);
+        if (g_moveSizeHook) UnhookWinEvent(g_moveSizeHook);
         if (timerId) KillTimer(nullptr, timerId);
         if (g_desktops) g_desktops->Release();
         if (g_automation) g_automation->Release();
@@ -433,6 +483,7 @@ DWORD WINAPI WatchWindows(void*) {
     UnhookWinEvent(g_showHook);
     UnhookWinEvent(g_destroyHook);
     UnhookWinEvent(g_minimizeHook);
+    UnhookWinEvent(g_moveSizeHook);
     if (g_desktops) g_desktops->Release();
     if (g_automation) g_automation->Release();
     if (SUCCEEDED(com)) CoUninitialize();
